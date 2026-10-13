@@ -8,7 +8,7 @@ using Windows.Devices.Radios;
 namespace CranialTherapy;
 
 // 从窗口线程调用。Windows 蓝牙事件会回到窗口线程后再更新列表和状态。
-public sealed class BluetoothService : IDisposable
+public sealed partial class BluetoothService : IDisposable
 {
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _scanTimer;
@@ -137,7 +137,7 @@ public sealed class BluetoothService : IDisposable
 
             // 仅创建 BluetoothLEDevice 不代表已经连接；实际发现服务后再判断结果。
             var result = await candidate.GetGattServicesAsync(BluetoothCacheMode.Uncached);
-            services = result.Services;
+            services = result.Services ?? [];
             if (_disposed) return;
             if (result.Status != GattCommunicationStatus.Success)
                 throw new InvalidOperationException($"设备服务访问失败（{result.Status}），请确认设备可连接。");
@@ -148,6 +148,25 @@ public sealed class BluetoothService : IDisposable
                 throw new InvalidOperationException("无法创建蓝牙连接会话，请重试。");
 
             session.MaintainConnection = true;
+            var receiveChannels = new List<BleChannel>();
+            var sendChannels = new List<BleChannel>();
+            int unavailableServices = 0;
+            foreach (var service in services)
+            {
+                var characteristics = await service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+                if (_disposed) return;
+                if (characteristics.Status != GattCommunicationStatus.Success)
+                {
+                    unavailableServices++;
+                    continue;
+                }
+                foreach (var characteristic in characteristics.Characteristics)
+                {
+                    var channel = new BleChannel(characteristic);
+                    if (channel.CanReceive) receiveChannels.Add(channel);
+                    if (channel.CanSend) sendChannels.Add(channel);
+                }
+            }
             if (candidate.ConnectionStatus != BluetoothConnectionStatus.Connected)
                 throw new InvalidOperationException("设备尚未连接或已断开，请重新连接。");
 
@@ -158,7 +177,13 @@ public sealed class BluetoothService : IDisposable
             session = null;
             services = [];
             _device.ConnectionStatusChanged += OnConnectionStatusChanged;
-            SetStatus($"已连接：{selected.Name}（{selected.AddressText}）");
+            foreach (var channel in receiveChannels) ReceiveChannels.Add(channel);
+            foreach (var channel in sendChannels) SendChannels.Add(channel);
+            string channelInfo = $"接收通道 {receiveChannels.Count} 个，发送通道 {sendChannels.Count} 个。";
+            if (receiveChannels.Count == 0) channelInfo += "设备未提供通知接收通道。";
+            if (sendChannels.Count == 0) channelInfo += "设备未提供可写通道。";
+            if (unavailableServices > 0) channelInfo += $"有 {unavailableServices} 个服务无法读取。";
+            SetStatus($"已连接：{selected.Name}（{selected.AddressText}）。{channelInfo}");
             // 补查订阅事件前可能发生的断线。
             OnConnectionStatusChanged(_device, null!);
         }
@@ -213,6 +238,7 @@ public sealed class BluetoothService : IDisposable
 
     private void ReleaseConnection()
     {
+        ClearDataConnection();
         if (_device != null) _device.ConnectionStatusChanged -= OnConnectionStatusChanged;
         if (_session != null)
         {
