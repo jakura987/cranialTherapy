@@ -11,6 +11,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         _bluetooth = new BluetoothService(Dispatcher);
         DeviceList.ItemsSource = _bluetooth.Devices;
+
         _bluetooth.StateChanged += Bluetooth_StateChanged;
         UpdateControls();
     }
